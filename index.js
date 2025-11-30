@@ -4,6 +4,7 @@ const app = express();
 const cors = require("cors");
 const port = process.env.PORT || 4000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
 app.use(cors());
 app.use(express.json());
@@ -55,10 +56,42 @@ const run = async () => {
     app.delete("/parcels/:id", async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
-      const result = parcelColl.deleteOne(query);
+      const result = await parcelColl.deleteOne(query);
       res.send(result);
     });
+    // payment apis
 
+    app.post("/create-checkout-session", async (req, res) => {
+      const paymentInfo = req.body;
+      const ammount = parseInt(paymentInfo.cost);
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            // Provide the exact Price ID (for example, price_1234) of the product you want to sell
+            price_data: {
+              currency: "USD",
+              unit_amount: ammount,
+              product_data: {
+                name: paymentInfo.parcelName,
+              },
+            },
+
+            quantity: 1,
+          },
+        ],
+        customer_email: paymentInfo.senderEmail,
+        metadata: {
+          parcelId: paymentInfo.parcelId,
+        },
+        mode: "payment",
+        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success`,
+        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+      });
+      console.log(session);
+      res.send({ url: session.url });
+    });
+
+    //
     await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
