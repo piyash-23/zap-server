@@ -5,6 +5,11 @@ const cors = require("cors");
 const port = process.env.PORT || 4000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
+const crypto = require("crypto");
+
+function generateTrackingId() {
+  return "TRK-" + crypto.randomBytes(6).toString("hex").toUpperCase();
+}
 
 app.use(cors());
 app.use(express.json());
@@ -29,6 +34,8 @@ const run = async () => {
     // database create
     const zapDB = client.db("zap_shift_db");
     const parcelColl = zapDB.collection("parcelCollection");
+    const paymentColl = zapDB.collection("payment");
+    // await paymentColl.createIndex({ transactionId: 1 }, { unique: true });
     // get the parcels
     app.get("/parcels", async (req, res) => {
       const query = {};
@@ -68,7 +75,7 @@ const run = async () => {
         line_items: [
           {
             price_data: {
-              currency: "BDT",
+              currency: "USD",
               unit_amount: ammount,
               product_data: {
                 name: `Please Pay for ${paymentInfo.parcelName}`,
@@ -81,6 +88,7 @@ const run = async () => {
         customer_email: paymentInfo.senderEmail,
         metadata: {
           parcelId: paymentInfo.parcelId,
+          parcelName: paymentInfo.parcelName,
         },
         success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
@@ -109,6 +117,7 @@ const run = async () => {
         customer_email: paymentInfo.senderEmail,
         metadata: {
           parcelId: paymentInfo.parcelId,
+          parcelName: paymentInfo.parcelName,
         },
         mode: "payment",
         success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
@@ -118,23 +127,64 @@ const run = async () => {
       res.send({ url: session.url });
     });
     // create session id for stripe validation
+
     app.patch("/payment-success", async (req, res) => {
       const sessionId = req.query.session_id;
       const session = await stripe.checkout.sessions.retrieve(sessionId);
-      console.log(session);
+      const transactionId = session.payment_intent;
+      const query = { transactionId: transactionId };
+      const isExist = await paymentColl.findOne(query);
+      if (isExist) {
+        return res.send({ message: "Product is Already existed" });
+      }
+      // console.log(session);
       if (session.payment_status === "paid") {
         const id = session.metadata.parcelId;
         const query = { _id: new ObjectId(id) };
+        const trackingId = generateTrackingId();
         const update = {
           $set: {
             paymentStatus: "paid",
+            trackingId: trackingId,
           },
         };
         const result = await parcelColl.updateOne(query, update);
-        res.send({ success: true });
+        // transaction tracking id here
+        const payInfo = {
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          customerEmail: session.customer_email,
+          paymentStatus: session.payment_status,
+          parcelId: session.metadata.parcelId,
+          parcelName: session.metadata.parcelName,
+          transactionId: session.payment_intent,
+          paidAt: new Date(),
+        };
+        if (session.payment_status === "paid") {
+          const payResult = await paymentColl.insertOne(payInfo);
+          return res.send({
+            success: true,
+            modifyResult: result,
+            paymentInfo: payInfo,
+          });
+        }
+        return res.send({ success: true });
       }
       res.send({ success: false });
     });
+
+    // get payment api
+    app.get("/payments", async (req, res) => {
+      const email = req.query.email;
+      const query = {};
+      if (email) {
+        query.customerEmail = email;
+      }
+      const cursor = paymentColl.find(query);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+
     //
     await client.db("admin").command({ ping: 1 });
     console.log(
